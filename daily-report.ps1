@@ -3,25 +3,32 @@
     Daily report: Jira task chuyển sang Closed/Resolved/Done + GitLab MR đã merge, post vào Teams.
 
 .DESCRIPTION
+    Mỗi lần chạy báo cáo cho một project (-Project <KEY>): cấu hình = .env chung (Jira, GitLab, chat test)
+    rồi projects\<KEY>.env ghi đè (Jira project, board, repo GitLab, webhook group). State lưu ở state\<KEY>.json,
+    log và payload ở logs\<KEY>\.
     Khoảng thời gian báo cáo = [lần gửi thành công trước, 00:00 hôm nay).
-    Lần đầu (chưa có state.json): thứ 2 lấy từ thứ 6, các ngày khác lấy hôm qua.
+    Lần đầu (chưa có state\<KEY>.json): thứ 2 lấy từ thứ 6, các ngày khác lấy hôm qua.
     Nhờ vậy nếu máy tắt một hôm, lần chạy sau tự gộp luôn những ngày bị lỡ.
-    Mỗi lần gửi group thành công, số liệu được lưu vào state.json (history) để tính xu hướng,
+    Mỗi lần gửi group thành công, số liệu được lưu vào state\<KEY>.json (history) để tính xu hướng,
     sparkline và tổng kết tuần (thứ 6).
     Khi chạy bị lỗi, card cảnh báo chỉ gửi tới TEAMS_TEST_WEBHOOK_URL (chat test), không bao giờ gửi lên group.
     Card vượt $MaxPayloadBytes (~20KB) thì được tách thành nhiều tin nhắn liên tiếp, giữ đủ mọi dòng.
     Card tổng kết sprint: sprint (active/closed, thuộc scrum board của project) có thời điểm kết thúc
     (sớm hơn giữa completeDate và endDate) nằm trong khoảng báo cáo thì được gửi ngay sau card daily.
-    Mỗi sprint chỉ gửi group một lần (state.json: sprintsReported). Bước sprint lỗi sau khi daily đã gửi thì
+    Mỗi sprint chỉ gửi group một lần (state\<KEY>.json: sprintsReported). Bước sprint lỗi sau khi daily đã gửi thì
     lần chạy sau tìm sprint từ mốc sprintCheckedUntil (tối đa 14 ngày) nên card sprint không bị mất.
 
+.PARAMETER Project
+    Mã project (bắt buộc), vd DG: đọc cấu hình riêng từ projects\<KEY>.env. File đó không có JIRA_PROJECT
+    thì JIRA_PROJECT = <KEY>. Card báo lỗi (gửi chat test chung) có tiền tố [<KEY>].
+
 .PARAMETER DryRun
-    Chỉ in ra màn hình + ghi logs\last-payload.json (và last-payload-2.json, ... khi card bị tách),
-    logs\card-for-designer.json (card sprint: sprint-<id>-payload*.json, sprint-<id>-card-for-designer.json),
-    không post Teams, không cập nhật state.json. Card sprint luôn được in, kể cả sprint đã gửi group rồi.
+    Chỉ in ra màn hình + ghi logs\<KEY>\last-payload.json (và last-payload-2.json, ... khi card bị tách),
+    logs\<KEY>\card-for-designer.json (card sprint: sprint-<id>-payload*.json, sprint-<id>-card-for-designer.json),
+    không post Teams, không cập nhật state\<KEY>.json. Card sprint luôn được in, kể cả sprint đã gửi group rồi.
 
 .PARAMETER Test
-    Gửi tới TEAMS_TEST_WEBHOOK_URL (chat riêng) thay vì group. Không cập nhật state.json,
+    Gửi tới TEAMS_TEST_WEBHOOK_URL (chat riêng) thay vì group. Không cập nhật state\<KEY>.json,
     không chặn "hôm nay đã gửi rồi", card sprint luôn được gửi kể cả sprint đã gửi group rồi.
 
 .PARAMETER From
@@ -38,18 +45,21 @@
 
 .PARAMETER SprintId
     Chỉ gửi card tổng kết của sprint này (id sprint Jira, vd 1884), bỏ qua daily report.
-    Dùng được với -DryRun / -Test; gửi group thì ghi id vào state.json (sprintsReported),
+    Dùng được với -DryRun / -Test; gửi group thì ghi id vào state\<KEY>.json (sprintsReported),
     sprint đã gửi group rồi thì bỏ qua (thêm -Force để gửi lại).
 
 .EXAMPLE
-    .\daily-report.ps1 -DryRun
-    .\daily-report.ps1 -Test
-    .\daily-report.ps1 -From 2026-10-27 -To 2026-11-03 -DryRun
-    .\daily-report.ps1 -From 2026-11-16 -To 2026-11-17 -DryRun    # xem trước daily + card sprint của sáng mai
-    .\daily-report.ps1 -SprintId 1884 -DryRun
-    .\daily-report.ps1 -SprintId 1895 -Test
+    .\daily-report.ps1 -Project DG -DryRun
+    .\daily-report.ps1 -Project DG -Test
+    .\daily-report.ps1 -Project DG -From 2026-10-27 -To 2026-11-03 -DryRun
+    .\daily-report.ps1 -Project DG -From 2026-11-16 -To 2026-11-17 -DryRun    # xem trước daily + card sprint của sáng mai
+    .\daily-report.ps1 -Project DG -SprintId 1884 -DryRun
+    .\daily-report.ps1 -Project DG -SprintId 1895 -Test
 #>
 param(
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[A-Za-z0-9_-]+$')]
+    [string]$Project,
     [switch]$DryRun,
     [switch]$Test,
     [string]$From,
@@ -58,15 +68,24 @@ param(
     [ValidateRange(1, 2147483647)]
     [int]$SprintId
 )
+# Chuẩn hoá mã project: -Project dg và -Project DG cho cùng tiêu đề card / mã Jira mặc định.
+$Project = $Project.ToUpperInvariant()
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $root = $PSScriptRoot
-$logDir = Join-Path $root 'logs'
-$statePath = Join-Path $root 'state.json'
+# Cấu hình 2 lớp: .env chung (Jira, GitLab, chat test) rồi projects\<KEY>.env ghi đè phần riêng của project.
+$sharedEnvPath = Join-Path $root '.env'
+$projectDir = Join-Path $root 'projects'
+$projectEnvPath = Join-Path $projectDir "$Project.env"
+# Mỗi project một state và một thư mục log riêng, để các project không đè dữ liệu của nhau.
+$logDir = Join-Path (Join-Path $root 'logs') $Project
+$stateDir = Join-Path $root 'state'
+$statePath = Join-Path $stateDir "$Project.json"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 $logPath = Join-Path $logDir ((Get-Date).ToString('yyyy-MM-dd') + '.log')
 Start-Transcript -Path $logPath -Append | Out-Null
 
@@ -82,15 +101,18 @@ $MaxErrorStackLines = 3
 # Thời gian chờ tối đa mỗi lệnh glab; phải nhỏ hơn nhiều so với ExecutionTimeLimit của Task Scheduler (10 phút)
 # để catch còn kịp chạy và gửi cảnh báo.
 $GlabTimeoutMs = 120000
-# Số id sprint đã gửi card tổng kết được giữ trong state.json (sprintsReported); đủ dài để không bao giờ gửi lại sprint cũ.
+# Số id sprint đã gửi card tổng kết được giữ trong state\<KEY>.json (sprintsReported); đủ dài để không bao giờ gửi lại sprint cũ.
 $MaxReportedSprints = 50
 # Bước sprint lỗi thì lần sau tìm sprint từ sprintCheckedUntil, nhưng không lùi quá số ngày này (giống giới hạn gộp ngày của daily).
 $SprintCatchUpDays = 14
 # Card sprint: số dòng task tối đa mỗi TextBlock; người có nhiều task hơn được chia thành nhiều Container
 # để không block nào vượt $MaxPayloadBytes (Split-Card chỉ chuyển nguyên block, không chia được TextBlock).
 $MaxBulletLinesPerBlock = 40
-# Các trường của state.json; mang đủ trong bộ nhớ để lần ghi nào cũng không làm mất trường khác.
+# Các trường của state\<KEY>.json; mang đủ trong bộ nhớ để lần ghi nào cũng không làm mất trường khác.
 $StateKeys = @('lastEnd', 'sentAt', 'history', 'sprintsReported', 'sprintCheckedUntil')
+# Key riêng của project: chỉ được nằm trong projects\<KEY>.env. Có trong .env chung thì throw, để project này không
+# lặng lẽ kế thừa webhook / repo / board của project khác (gửi nhầm channel). JIRA_DONE_STATUSES được phép làm mặc định chung.
+$ProjectOnlyKeys = @('JIRA_PROJECT', 'JIRA_BOARD_ID', 'GITLAB_PROJECTS', 'TEAMS_WEBHOOK_URL')
 
 $utf8 = New-Object Text.UTF8Encoding $false
 # Truyền -SprintId: chỉ gửi card tổng kết của sprint đó, bỏ qua daily.
@@ -113,9 +135,33 @@ function Get-Setting([hashtable]$cfg, [string]$key, [string]$default) {
     $v = $cfg[$key]
     if ([string]::IsNullOrWhiteSpace($v)) {
         if ($PSBoundParameters.ContainsKey('default')) { return $default }
-        throw "Thiếu $key trong .env"
+        throw "Thiếu $key trong .env / projects\$Project.env"
     }
     return $v
+}
+
+# Đọc .env chung trước, rồi projects\<KEY>.env ghi đè (key nào cũng ghi đè được).
+# Key trong $ProjectOnlyKeys chỉ lấy từ file project. File project không có JIRA_PROJECT thì JIRA_PROJECT = <KEY>.
+function Read-ProjectConfig {
+    if (-not (Test-Path -LiteralPath $projectEnvPath)) {
+        $available = @(Get-ChildItem -LiteralPath $projectDir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -eq '.env' } | ForEach-Object { $_.BaseName } | Sort-Object)
+        $availableText = if ($available.Count -gt 0) { $available -join ', ' } else { '(chưa có project nào)' }
+        throw "Không thấy file cấu hình của project '$Project': $projectEnvPath. Project có sẵn trong projects\*.env: $availableText"
+    }
+    $merged = Read-DotEnv $sharedEnvPath
+    $leaked = @($ProjectOnlyKeys | Where-Object { $merged.ContainsKey($_) })
+    if ($leaked.Count -gt 0) {
+        throw ".env chung đang chứa key riêng của project: $($leaked -join ', '). Chuyển sang projects\<KEY>.env rồi xoá khỏi .env."
+    }
+    $projectCfg = Read-DotEnv $projectEnvPath
+    $required = @('GITLAB_PROJECTS')
+    if (Test-GroupSend) { $required += 'TEAMS_WEBHOOK_URL' }
+    $missing = @($required | Where-Object { [string]::IsNullOrWhiteSpace($projectCfg[$_]) })
+    if ($missing.Count -gt 0) { throw "Thiếu $($missing -join ', ') trong $projectEnvPath (key riêng của project, không lấy từ .env chung)." }
+    foreach ($k in $projectCfg.Keys) { $merged[$k] = $projectCfg[$k] }
+    if ([string]::IsNullOrWhiteSpace($projectCfg['JIRA_PROJECT'])) { $merged['JIRA_PROJECT'] = $Project }
+    return $merged
 }
 
 # Quote một tham số theo quy tắc CommandLineToArgvW: nhân đôi backslash đứng trước dấu " hoặc cuối chuỗi, escape dấu ".
@@ -438,7 +484,7 @@ function Send-Report($card, [string]$title, [string]$payloadPrefix) {
         return
     }
 
-    if ([string]::IsNullOrWhiteSpace($webhook)) { throw "Thiếu $webhookKey trong .env" }
+    if ([string]::IsNullOrWhiteSpace($webhook)) { throw "Thiếu $webhookKey trong .env / projects\$Project.env" }
     for ($p = 0; $p -lt $cards.Count; $p++) {
         if ($p -gt 0) { Start-Sleep -Seconds $PartDelaySeconds }
         Send-Teams $webhook $cards[$p]
@@ -448,7 +494,7 @@ function Send-Report($card, [string]$title, [string]$payloadPrefix) {
     Write-Host "$sentText."
 }
 
-# State đọc từ state.json ($state: kết quả ConvertFrom-Json, có thể $null) -> ordered dict chỉ gồm các trường $StateKeys đang có.
+# State đọc từ state\<KEY>.json ($state: kết quả ConvertFrom-Json, có thể $null) -> ordered dict chỉ gồm các trường $StateKeys đang có.
 # Trường chưa có (vd chưa từng gửi daily) thì vẫn để trống, không tự bịa ra lastEnd.
 function ConvertTo-StateData($state) {
     $data = [ordered]@{}
@@ -466,13 +512,13 @@ function Read-StateData([string]$path) {
 
 # Ghi toàn bộ state trong $data; trường nào không có thì không ghi.
 function Save-State([string]$path, [System.Collections.IDictionary]$data) {
-    # Ghi ra file tạm rồi đổi tên, để mất điện giữa chừng không làm hỏng state.json.
+    # Ghi ra file tạm rồi đổi tên, để mất điện giữa chừng không làm hỏng state\<KEY>.json.
     $tmp = "$path.tmp"
     $data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tmp -Encoding UTF8
     Move-Item -LiteralPath $tmp -Destination $path -Force
 }
 
-# Ghi phần sprint vào state.json: thêm $addSprintIds vào sprintsReported, và/hoặc dời mốc sprintCheckedUntil.
+# Ghi phần sprint vào state\<KEY>.json: thêm $addSprintIds vào sprintsReported, và/hoặc dời mốc sprintCheckedUntil.
 # Đọc lại file ngay trước khi ghi để không đè dữ liệu do lần chạy khác vừa ghi: các trường khác lấy theo file,
 # sprintsReported lấy hợp hai bên (giữ $MaxReportedSprints id gần nhất), sprintCheckedUntil lấy mốc muộn hơn.
 function Save-SprintState([int[]]$addSprintIds, [string]$checkedUntil) {
@@ -537,7 +583,7 @@ function Get-ReportedSprintIds {
 # Gửi thật lên group (không -DryRun, không -Test): chỉ khi đó mới lọc / ghi sprintsReported.
 function Test-GroupSend { return (-not $DryRun -and -not $Test) }
 
-# -From/-To lên group không gửi card sprint (khoảng tuỳ chọn không đụng state.json); -DryRun / -Test vẫn xem thử được.
+# -From/-To lên group không gửi card sprint (khoảng tuỳ chọn không đụng state\<KEY>.json); -DryRun / -Test vẫn xem thử được.
 function Test-SkipSprintCustomRange { return ((Test-GroupSend) -and [bool]($From -or $To)) }
 
 # -SprintId lên group mà sprint đã gửi rồi: bỏ qua, trừ khi -Force.
@@ -598,7 +644,7 @@ function Test-IssueDone($issue) {
     return (($doneStatusNames -contains $st.name) -or ($st.statusCategory -and $st.statusCategory.key -eq 'done'))
 }
 
-# Khoá sắp xếp tự nhiên: theo project rồi theo số (RDG-9 trước RDG-10).
+# Khoá sắp xếp tự nhiên: theo project rồi theo số (DG-9 trước DG-10).
 function Get-IssueSortKey([string]$key) {
     $i = $key.LastIndexOf('-')
     $n = 0
@@ -740,13 +786,20 @@ function Invoke-SprintStep([datetime]$start, [datetime]$end, [bool]$afterDaily) 
     return $pending.Count
 }
 
-$cfg = Read-DotEnv (Join-Path $root '.env')
-$webhookKey = if ($Test) { 'TEAMS_TEST_WEBHOOK_URL' } else { 'TEAMS_WEBHOOK_URL' }
-$webhook = $cfg[$webhookKey]
+# Đọc cấu hình trong try để lỗi cấu hình (thiếu file project, ...) cũng được ghi log và báo vào chat test.
+$cfg = $null
 # Bước đang chạy, để card báo lỗi nói rõ daily đã gửi hay chưa: 'daily' | 'sprint' (daily đã gửi) | 'sprint-only' (-SprintId).
 $phase = 'daily'
 
 try {
+    # Chặn quên chuyển state của bản 1 project: không thì mất history, sprintsReported và chặn "hôm nay đã gửi".
+    if ((Test-Path -LiteralPath (Join-Path $root 'state.json')) -and -not (Test-Path -LiteralPath $statePath)) {
+        throw "Còn state.json cũ ở thư mục gốc: chuyển thành state\$Project.json (nếu là state của $Project) trước khi chạy."
+    }
+    $cfg = Read-ProjectConfig
+    $webhookKey = if ($Test) { 'TEAMS_TEST_WEBHOOK_URL' } else { 'TEAMS_WEBHOOK_URL' }
+    $webhook = $cfg[$webhookKey]
+
     # ---------- State + cấu hình Jira (daily và card sprint đều dùng) ----------
     $today = (Get-Date).Date
     $state = $null
@@ -756,7 +809,7 @@ try {
 
     $jiraUrl = (Get-Setting $cfg 'JIRA_URL').TrimEnd('/')
     $jiraToken = Get-Setting $cfg 'JIRA_PERSONAL_TOKEN'
-    $jiraProject = Get-Setting $cfg 'JIRA_PROJECT' 'RDG'
+    $jiraProject = Get-Setting $cfg 'JIRA_PROJECT'
     $doneStatusNames = @((Get-Setting $cfg 'JIRA_DONE_STATUSES' 'Closed,Resolved,Done').Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $doneStatuses = $doneStatusNames | ForEach-Object { '"' + $_ + '"' }
 
@@ -1277,7 +1330,14 @@ try {
     Write-Host "LỖI ($phase): $msg"
     Write-Host $err.ScriptStackTrace
     # Thông báo lỗi chỉ gửi vào chat test, không bao giờ gửi lên group (kể cả khi đang chạy theo lịch).
-    $errorWebhook = if ($cfg) { $cfg['TEAMS_TEST_WEBHOOK_URL'] } else { $null }
+    $errorWebhook = $null
+    if ($cfg) {
+        $errorWebhook = $cfg['TEAMS_TEST_WEBHOOK_URL']
+    } elseif (-not $DryRun) {
+        # Lỗi khi đọc cấu hình ($cfg chưa có): vẫn thử lấy webhook chat test từ .env chung để báo lỗi.
+        try { $errorWebhook = (Read-DotEnv $sharedEnvPath)['TEAMS_TEST_WEBHOOK_URL'] }
+        catch { Write-Host "Không đọc được .env chung để gửi thông báo lỗi: $($_.Exception.Message)" }
+    }
     if ($DryRun) {
         Write-Host 'DryRun: không gửi thông báo lỗi lên Teams.'
     } elseif ([string]::IsNullOrWhiteSpace($errorWebhook)) {
@@ -1294,9 +1354,9 @@ try {
         }) -join ' ')
         if ($argText) { $mode += " · tham số: $argText" }
         $errTitle = switch ($phase) {
-            'sprint' { '⚠️ Card tổng kết sprint bị lỗi — daily ĐÃ gửi, chạy lại script (không -Force) hoặc dùng -SprintId' }
-            'sprint-only' { '⚠️ Card tổng kết sprint (-SprintId) bị lỗi' }
-            default { '⚠️ Daily report bị lỗi' }
+            'sprint' { "⚠️ [$Project] Card tổng kết sprint bị lỗi — daily ĐÃ gửi, chạy lại script (không -Force) hoặc dùng -SprintId" }
+            'sprint-only' { "⚠️ [$Project] Card tổng kết sprint (-SprintId) bị lỗi" }
+            default { "⚠️ [$Project] Daily report bị lỗi" }
         }
         try {
             Send-Teams $errorWebhook @{
